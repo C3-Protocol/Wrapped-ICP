@@ -1,0 +1,28 @@
+[package]
+name = "ledger_history"
+version = "0.1.0"
+authors = ["Hans Larsen <hans@larsen.online>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+lto = true
+opt-level = 'z'
+panic = 'abort'
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = "1"
+candid = "0.6"
+ic-types = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+dfn_candid = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+dfn_core = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+dfn_protobuf = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+ledger-canister = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+ic-nns-constants = { git = "https://github.com/dfinity/ic", rev = "779549eccfcf61ac702dfc2ee6d76ffdc2db1f7f" }
+
+

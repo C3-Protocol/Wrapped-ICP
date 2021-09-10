@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "canisters": {
+    "ledger_canister": {
+      "type": "custom",
+      "candid": "src/ledger_history/ledger_history.did",
+      "wasm": "target/wasm32-unknown-unknown/release/ledger_history.wasm",
+      "build": "cargo build --target wasm32-unknown-unknown --release --package ledger_history"
+    },
+    "WICP_motoko": {
+      "type": "motoko",
+      "main": "src/WICP-motoko/token.mo"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:8000",
+      "type": "ephemeral"
+    }
+  }
+}
