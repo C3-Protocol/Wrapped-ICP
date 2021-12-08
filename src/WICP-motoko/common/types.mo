@@ -1,10 +1,22 @@
 import Time "mo:base/Time";
 import Result "mo:base/Result";
 import Hash "mo:base/Hash";
+import Nat "mo:base/Nat";
 import Nat64 "mo:base/Nat64";
 import Text "mo:base/Text";
 
 module {
+    public type RecordIndex = Nat;
+
+    public module RecordIndex = {
+        public func equal(x : RecordIndex, y : RecordIndex) : Bool {
+            x == y
+        };
+
+        public func hash(x : RecordIndex) : Hash.Hash {
+            Text.hash(Nat.toText(x))
+        };
+    };
     /// Update call operations
     public type Operation = {
         #mint;
@@ -25,9 +37,19 @@ module {
         timestamp: Time.Time;
     };
 
+    public type WithDrawRecord = {
+        caller: Principal;
+        accountId: Text;
+        op: Operation;
+        index: Nat;
+        amount: Nat;
+        fee: Nat;
+        timestamp: Time.Time;
+    };
+
     public type StorageActor = actor {
-        addRecord : (caller: Principal, op: Operation, from: ?Principal, to: ?Principal, amount: Nat,
-            fee: Nat, timestamp: Time.Time) -> async Nat;
+        addRecord : shared (record: OpRecord) -> async Bool;
+        addRecords : shared (records: [OpRecord]) -> async Bool;
     };
 
     public type BlockHeight = Nat64;
@@ -36,6 +58,12 @@ module {
     public type ICPTransactionRecord = {
         from_subaccount: ?SubAccount;
         blockHeight: BlockHeight;
+    };
+
+    public type MintInfo = {
+        principalId: Principal;
+        accountId: Text;
+        amount: Nat;
     };
 
     public type Balance = Nat;

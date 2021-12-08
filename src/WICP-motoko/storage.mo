@@ -10,6 +10,7 @@ import HashMap "mo:base/HashMap";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array";
 import Iter "mo:base/Iter";
+import List "mo:base/List";
 import Option "mo:base/Option";
 import Time "mo:base/Time";
 import Types "./common/types";
@@ -18,21 +19,41 @@ import Cycles "mo:base/ExperimentalCycles";
 shared(msg) actor class Storage(_owner: Principal) {
     type Operation = Types.Operation;
     type OpRecord = Types.OpRecord;
+    type RecordIndex = Types.RecordIndex;
 
     private stable var owner_ : Principal = _owner;
     private stable var token_canister_id_ : Principal = msg.caller;
-    private stable var ops : [var OpRecord] = [var];
-    private var ops_acc = HashMap.HashMap<Principal, [Nat]>(1, Principal.equal, Principal.hash);
 
-    private stable var opsAccEntries: [(Principal, [Nat])] = [];
+    private stable var opsEntries : [(RecordIndex, OpRecord)] = [];
+    private var ops = HashMap.HashMap<RecordIndex, OpRecord>(1, Types.RecordIndex.equal, Types.RecordIndex.hash);
+
+    private stable var opsAccEntries: [(Principal, [RecordIndex])] = [];
+    type ListRecord = List.List<RecordIndex>;
+    private var opsAcc = HashMap.HashMap<Principal, ListRecord>(1, Principal.equal, Principal.hash);
+
+    private stable var dataUser : Principal = Principal.fromText("umgol-annoi-q7dqt-qbsw6-a2pww-eitzs-6vi5t-efaz6-xquey-5jmut-sqe");
 
     system func preupgrade() {
-        opsAccEntries := Iter.toArray(ops_acc.entries());
+        var size = opsAcc.size();
+        var temp1 : [var (Principal, [RecordIndex])] = Array.init<(Principal, [RecordIndex])>(size, (owner_, []));
+        size := 0;
+        for ((k, v) in opsAcc.entries()) {
+            temp1[size] := (k, List.toArray(v));
+            size += 1;
+        };
+        opsAccEntries := Array.freeze(temp1);
+
+        opsEntries := Iter.toArray(ops.entries());
     };
 
     system func postupgrade() {
-        ops_acc := HashMap.fromIter<Principal, [Nat]>(opsAccEntries.vals(), 1, Principal.equal, Principal.hash);
+        for ((k, v) in opsAccEntries.vals()) {
+            opsAcc.put(k, List.fromArray<RecordIndex>(v));
+        };
         opsAccEntries := [];
+
+        ops := HashMap.fromIter<RecordIndex, OpRecord>(opsEntries.vals(), 1, Types.RecordIndex.equal, Types.RecordIndex.hash);
+        opsEntries := [];
     };
 
     public shared(msg) func setTokenCanisterId(token: Principal) : async Bool {
@@ -41,90 +62,98 @@ shared(msg) actor class Storage(_owner: Principal) {
         return true;
     };
 
-    private func putOpsAcc(who: Principal, o: OpRecord) {
-        switch (ops_acc.get(who)) {
-            case (?op_acc) {
-                var op_new : [Nat] = Array.append(op_acc, [o.index]);
-                ops_acc.put(who, op_new);
-            };
-            case (_) {
-                ops_acc.put(who, [o.index]);
-            };   
-        }
+    public query func getTokenCanisterId() : async Principal {
+        token_canister_id_
     };
 
-    public shared(msg) func addRecord(
-        caller: Principal, op: Operation, from: ?Principal, to: ?Principal, amount: Nat,
-        fee: Nat, timestamp: Time.Time
-    ) : async Nat {
-        assert(msg.caller == token_canister_id_);
-        let index = ops.size();
-        let o : OpRecord = {
-            caller = caller;
-            op = op;
-            index = index;
-            from = from;
-            to = to;
-            amount = amount;
-            fee = fee;
-            timestamp = timestamp;
+    public shared(msg) func setDataUser(user: Principal) : async Bool {
+        assert(msg.caller == owner_);
+        dataUser := user;
+        return true;
+    };
+
+    public shared(msg) func addRecord( record: OpRecord ) : async Bool {
+        assert( msg.caller == token_canister_id_);
+        if(Option.isNull(ops.get(record.index))){
+            ops.put(record.index, record);
+            _addAccRecord(record);
         };
-        ops := Array.thaw(Array.append(Array.freeze(ops), Array.make(o)));
-        putOpsAcc(caller, o);
-        if ((not Option.isNull(from)) and (from != ?caller)) { putOpsAcc(Option.unwrap(from), o); };
-        if ((not Option.isNull(to)) and (to != ?caller) and (to != from) ) { putOpsAcc(Option.unwrap(to), o); };
-        return index;
+        return true;
     };
 
-    /// Get History by index.
-    public query func getHistoryByIndex(index: Nat) : async OpRecord {
-        return ops[index];
+    public shared(msg) func addRecords( records: [OpRecord] ) : async Bool {
+        assert( msg.caller == token_canister_id_ and records.size() > 0 );
+        for(record in Iter.fromArray(records)) {
+            if(Option.isNull(ops.get(record.index))){
+                ops.put(record.index, record);
+                _addAccRecord(record);
+            };
+        };
+        return true;
     };
 
-    /// Get history
-    public query func getHistory(start: Nat, num: Nat) : async [OpRecord] {
-        var ret: [OpRecord] = [];
-        var i = start;
-        while(i < start + num and i < ops.size()) {
-            ret := Array.append(ret, [ops[i]]);
-            i += 1;
+    private func _checkPrincipal(id: Principal) : Bool {
+        var ret:Bool = false;
+        if(Principal.toText(id).size() > 60){
+            ret := true;
         };
         return ret;
     };
 
-    /// Get history by account.
-    public query func getHistoryByAccount(a: Principal) : async ?[OpRecord] {
-        switch (ops_acc.get(a)) {
-            case (?op_acc) {
-                var ret: [OpRecord] = [];
-                for(i in Iter.fromArray(op_acc)) {
-                    ret := Array.append(ret, [ops[i]]);
-                };
-                return ?ret;
+    private func _addAccRecord( o: OpRecord ) {
+        if (_checkPrincipal(o.caller)) { _putOpsAcc(o.caller, o.index); };
+        if (Option.isSome(o.from) and (o.from != ?o.caller) and _checkPrincipal(Option.unwrap(o.from))) { _putOpsAcc(Option.unwrap(o.from), o.index); };
+        if (Option.isSome(o.to) and (o.to != ?o.caller) and (o.to != o.from) and _checkPrincipal(Option.unwrap(o.to))) { _putOpsAcc(Option.unwrap(o.to), o.index); };
+    };
+
+    private func _putOpsAcc(who: Principal, index: RecordIndex) {
+        switch (opsAcc.get(who)) {
+            case (?l) {
+                let newl = List.push<RecordIndex>(index, l);
+                opsAcc.put(who, newl);
             };
             case (_) {
-                return null;
-            };
+                let l1 = List.nil<RecordIndex>();
+                let l2 = List.push<RecordIndex>(index, l1);
+                opsAcc.put(who, l2);
+            };   
         }
     };
+
+    /// Get history
+    public shared query(msg) func getHistory(start: Nat, num: Nat) : async [OpRecord] {
+        assert( msg.caller == owner_ or msg.caller == dataUser );
+        
+        var ret: List.List<OpRecord> = List.nil<OpRecord>();
+        var index = start;
+        while( Option.isSome(ops.get(index)) and index < start + num ) {
+            //ret := Array.append(ret, [Option.unwrap(ops.get(index))]);
+            ret := List.push(Option.unwrap(ops.get(index)), ret);
+            index += 1;
+        };
+        return List.toArray(ret);
+    };
+
+    public query func getHistoryByAccount(user: Principal) : async [OpRecord] {
+
+        var ret: List.List<OpRecord> = List.nil<OpRecord>();
+        switch ( opsAcc.get(user) ) {
+            case (?op_acc) {
+                List.iterate<RecordIndex>(op_acc, func (x : RecordIndex): () { 
+                    if(Option.isSome(ops.get(x))){
+                        ret := List.push(Option.unwrap(ops.get(x)), ret); 
+                    };
+                });
+            };
+            case (_) {};   
+        };
+        return List.toArray(ret);
+    };
+
+    public query func getOpsSize() : async Nat {
+        ops.size()
+    };
     
-    /// Get all update call history.
-    public query func allHistory() : async [OpRecord] {
-        return Array.freeze(ops);
-    };
-
-    public query func tokenCanisterId() : async Principal {
-        return token_canister_id_;
-    };
-
-    public query func owner() : async Principal {
-        return owner_;
-    };
-
-    public query func txAmount() : async Nat {
-        return ops.size();
-    };
-
     public query func getCycles() : async Nat {
         return Cycles.balance();
     };

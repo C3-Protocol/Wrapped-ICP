@@ -9,30 +9,36 @@
 import HashMap "mo:base/HashMap";
 import Principal "mo:base/Principal";
 import Types "./common/types";
+import Storage "./storage";
 import LedgerHistory "./common/ledgerHistory";
 import AID "./util/AccountIdentifier";
 import Result "mo:base/Result";
 import Time "mo:base/Time";
 import Nat64 "mo:base/Nat64";
+import Nat "mo:base/Nat";
 import Iter "mo:base/Iter";
+import List "mo:base/List";
 import Array "mo:base/Array";
 import Option "mo:base/Option";
 import Cycles "mo:base/ExperimentalCycles";
 
 /**
- * Desc: a Token wraped to ICP
+ * Desc: a Token anchor to ICP
  * mint same count WICP when receive ICP from user
  */
-shared(msg) actor class Token(_owner: Principal) {
+shared(msg) actor class Token(_owner: Principal, _feeTo: Principal) {
     type Operation = Types.Operation;
     type OpRecord = Types.OpRecord;
+    type WithDrawRecord = Types.WithDrawRecord;
     type BlockHeight = Types.BlockHeight;
+    type RecordIndex = Types.RecordIndex;
     type TransactionIndex = Types.TransactionIndex;
     type ICPTransactionRecord = Types.ICPTransactionRecord;
     type TransferResponse = Types.TransferResponse;
     type MintResponse = Types.MintResponse;
     type BurnResponse = Types.BurnResponse;
     type AccountIdentifier = AID.AccountIdentifier;
+    type MintInfo = Types.MintInfo;
     type SubAccount = AID.SubAccount;
     type StorageActor = Types.StorageActor;
     type LedgerHistoryActor = LedgerHistory.LedgerHistoryActor;
@@ -45,25 +51,34 @@ shared(msg) actor class Token(_owner: Principal) {
     private stable var decimals_ : Nat = 8;
     private stable var symbol_ : Text = "WICP";
     private stable var totalSupply_ : Nat = 0;
-    private stable var feeTo : Principal = _owner;
-    private stable var fee : Nat = 10000;
+    private stable var feeTo : Principal = _feeTo;
+    private stable var fee : Nat = 0;
+    private stable var minBurnAmount : Nat = 10_000_000;
     private stable var receiveICPAccArray : [AccountIdentifier] = [];
     private stable var balanceEntries : [(Principal, Nat)] = [];
-    private stable var allowanceEntries : [(Principal, [(Principal, Nat)])] = [];
+
     private var balances = HashMap.HashMap<Principal, Nat>(1, Principal.equal, Principal.hash);
     private var allowances = HashMap.HashMap<Principal, HashMap.HashMap<Principal, Nat>>(1, Principal.equal, Principal.hash);
 
     private stable var mintBlockHeightEntries : [(BlockHeight, Bool)] = [];
     private var mintBlockHeightMap = HashMap.HashMap<BlockHeight, Bool>(1, Types.BlockHeight.equal, Types.BlockHeight.hash);
 
-    private stable var ops : [OpRecord] = [];
-    private stable var opsBurn : [OpRecord] = [];
+    private stable var mintInfoEntries : [(BlockHeight, MintInfo)] = [];
+    private var mintInfoMap = HashMap.HashMap<BlockHeight, MintInfo>(1, Types.BlockHeight.equal, Types.BlockHeight.hash);
 
-    private func _addRecord(
+    private stable var opsIndex : Nat = 0;
+
+    private stable var opsWithDrawEntries : [(RecordIndex, WithDrawRecord)] = [];
+    private var opsWithDraw = HashMap.HashMap<RecordIndex, WithDrawRecord>(1, Types.RecordIndex.equal, Types.RecordIndex.hash);
+
+    private stable var storageCanister : ?StorageActor = null;
+    private stable var dataUser : Principal = Principal.fromText("umgol-annoi-q7dqt-qbsw6-a2pww-eitzs-6vi5t-efaz6-xquey-5jmut-sqe");
+
+    private func _genRecord(
         caller: Principal, op: Operation, from: ?Principal, to: ?Principal, amount: Nat,
         fee: Nat, timestamp: Time.Time
-    ) : Nat {
-        let index = ops.size();
+    ) : OpRecord {
+        let index = opsIndex;
         let o : OpRecord = {
             caller = caller;
             op = op;
@@ -74,27 +89,25 @@ shared(msg) actor class Token(_owner: Principal) {
             fee = fee;
             timestamp = timestamp;
         };
-        ops := Array.append(ops, [o]);
-        return index;
+        opsIndex += 1;
+        return o;
     };
 
-    private func _addBurnRecord(
-        caller: Principal, op: Operation, from: ?Principal, to: ?Principal, amount: Nat,
+    private func _addWithDrawRecord(
+        caller: Principal, accountId: AccountIdentifier, op: Operation, amount: Nat,
         fee: Nat, timestamp: Time.Time
-    ) : Nat {
-        let index = opsBurn.size();
-        let o : OpRecord = {
+    ) {
+        let index = opsWithDraw.size();
+        let o : WithDrawRecord = {
             caller = caller;
+            accountId = accountId;
             op = op;
             index = index;
-            from = from;
-            to = to;
             amount = amount;
             fee = fee;
             timestamp = timestamp;
         };
-        opsBurn := Array.append(opsBurn, [o]);
-        return index;
+        opsWithDraw.put(index, o);
     };
 
     private func _addFee(from: Principal, fee: Nat) {
@@ -135,6 +148,20 @@ shared(msg) actor class Token(_owner: Principal) {
         }
     };
 
+    public shared(msg) func setStorageCanisterId(storage: ?Principal) : async Bool {
+        assert(msg.caller == owner_);
+        if (storage == null) { storageCanister := null; }
+        else { storageCanister := ?actor(Principal.toText(Option.unwrap(storage))); };
+        return true;
+    };
+
+    public shared(msg) func newStorageCanister(owner: Principal) : async Bool {
+        assert(msg.caller == owner_ and storageCanister == null);
+        let storage = await Storage.Storage(owner);
+        storageCanister := ?storage;
+        return true;
+    };
+
     // set ledgerHistory canister id
     public shared(msg) func setLedHistoryCanisterId(ledgerHistoryId: Principal) : async Bool {
         assert(msg.caller == owner_);
@@ -142,9 +169,33 @@ shared(msg) actor class Token(_owner: Principal) {
         return true;
     };
 
+    public shared(msg) func setFee(_fee: Nat) : async Bool {
+        assert(msg.caller == owner_);
+        fee := _fee;
+        return true;
+    };
+
+    public shared(msg) func setFeeTo(_feeTo: Principal) : async Bool {
+        assert(msg.caller == owner_);
+        feeTo := _feeTo;
+        return true;
+    };
+
+    public shared(msg) func setMinBurnAmount(_amount: Nat) : async Bool {
+        assert(msg.caller == owner_);
+        minBurnAmount := _amount;
+        return true;
+    };
+
     public shared(msg) func setOwner(newOwner: Principal) : async Bool {
         assert(msg.caller == owner_);
         owner_ := newOwner;
+        return true;
+    };
+
+    public shared(msg) func setDataUser(user: Principal) : async Bool {
+        assert(msg.caller == owner_);
+        dataUser := user;
         return true;
     };
 
@@ -158,6 +209,16 @@ shared(msg) actor class Token(_owner: Principal) {
         return true;
     };
 
+    public shared(msg) func clearWithDrawRecord(index: Nat) : async Bool {
+        assert(msg.caller == owner_);
+        for((k,v) in opsWithDraw.entries()){
+            if(k < index){
+                opsWithDraw.delete(k);
+            };
+        };
+        return true;
+    };
+
     /// Transfers value amount of tokens to Principal to.
     public shared(msg) func transfer(to: Principal, value: Nat) : async TransferResponse {
         assert(msg.caller != to);
@@ -166,7 +227,37 @@ shared(msg) actor class Token(_owner: Principal) {
         _addFee(msg.caller, fee);
         _transfer(msg.caller, to, value - fee);
 
-        var trIndex: TransactionIndex = _addRecord(msg.caller, #transfer, ?msg.caller, ?to, value, fee, Time.now());
+        let record = _genRecord(msg.caller, #transfer, ?msg.caller, ?to, value, fee, Time.now());
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecord(record);
+        };
+        return #ok(record.index);
+    };
+
+    public shared(msg) func batchTransfer(tos: [Principal], values: [Nat]) : async TransferResponse {
+
+        if (tos.size() != values.size() or tos.size() == 0 or values.size() == 0) { return #err(#Other); };
+
+        var totalValue: Nat = 0;
+        for(i in Iter.range(0, values.size() - 1)){
+            totalValue := totalValue + values[i];
+        };
+        if (totalValue < fee) { return #err(#LessThanFee); };
+        if (_balanceOf(msg.caller) < totalValue + fee) { return #err(#InsufficientBalance); };
+        
+        _addFee(msg.caller, fee);
+        var trIndex: TransactionIndex = 0;
+        let now = Time.now();
+        var recordsList : List.List<OpRecord> = List.nil<OpRecord>();
+        for(i in Iter.range(0, values.size() - 1)){
+            _transfer(msg.caller, tos[i], values[i]);
+            let record = _genRecord(msg.caller, #batchTransfer, ?msg.caller, ?tos[i], values[i], fee, now);
+            trIndex := record.index;
+            if(storageCanister != null){ recordsList := List.push<OpRecord>(record, recordsList); };
+        };
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecords(List.toArray(recordsList));
+        };
         return #ok(trIndex);
     };
 
@@ -194,12 +285,15 @@ shared(msg) actor class Token(_owner: Principal) {
             };
         };
 
-        var trIndex: TransactionIndex = _addRecord(msg.caller, #transfer, ?from, ?to, value, fee, Time.now());
-        return #ok(trIndex);
+        let record = _genRecord(msg.caller, #transfer, ?from, ?to, value, fee, Time.now());
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecord(record);
+        };
+        return #ok(record.index);
     };
 
     public shared(msg) func batchTransferFrom(from: Principal, tos: [Principal], values: [Nat]) : async TransferResponse {
-        
+        assert(msg.caller != from);
         if (tos.size() != values.size() or tos.size() == 0 or values.size() == 0) { return #err(#Other); };
 
         var totalValue: Nat = 0;
@@ -213,9 +307,16 @@ shared(msg) actor class Token(_owner: Principal) {
 
         _addFee(from, fee);
         var trIndex: TransactionIndex = 0;
+        let now = Time.now();
+        var recordsList : List.List<OpRecord> = List.nil<OpRecord>();
         for(i in Iter.range(0, values.size() - 1)){
             _transfer(from, tos[i], values[i]);
-            trIndex := _addRecord(msg.caller, #batchTransfer, ?from, ?tos[i], values[i], fee, Time.now());
+            let record = _genRecord(msg.caller, #batchTransfer, ?from, ?tos[i], values[i], fee, now);
+            trIndex := record.index;
+            if(storageCanister != null){ recordsList := List.push<OpRecord>(record, recordsList); };
+        };
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecords(List.toArray(recordsList));
         };
         let allowed_new : Nat = allowed - totalValue;
         if (allowed_new != 0) {
@@ -252,8 +353,7 @@ shared(msg) actor class Token(_owner: Principal) {
             allowances.put(msg.caller, allowance_caller);
         };
 
-        var trIndex: TransactionIndex = _addRecord(msg.caller, #approve, ?msg.caller, ?spender, value, 0, Time.now());
-        return trIndex;
+        return opsIndex;
     };
 
     /// Creates value WICP tokens and assigns them to user when receive ICP from User, increasing the total supply.
@@ -262,6 +362,11 @@ shared(msg) actor class Token(_owner: Principal) {
             case(?b){ return #err(#AlreadyMint);};
             case _ {};
         };
+        switch(mintInfoMap.get(trxRecord.blockHeight)){
+            case(?b){ return #err(#AlreadyMint);};
+            case _ {};
+        };
+        
         var from: AccountIdentifier = AID.fromPrincipal(msg.caller, trxRecord.from_subaccount);
         let result = await ledHistoryCanisterActor.block(trxRecord.blockHeight);
         var amount: ICPTs = {e8s = 0;};
@@ -294,23 +399,57 @@ shared(msg) actor class Token(_owner: Principal) {
             case _ {balances.put(msg.caller, resAmount);};
         };
         totalSupply_ += resAmount;
-        mintBlockHeightMap.put(trxRecord.blockHeight, true);
+        //mintBlockHeightMap.put(trxRecord.blockHeight, true);
+        let minInfo = {
+            principalId = msg.caller;
+            accountId = from;
+            amount = resAmount;
+        };
+        mintInfoMap.put(trxRecord.blockHeight, minInfo);
 
-        var trIndex: TransactionIndex = _addRecord(msg.caller, #mint, null, ?msg.caller, Nat64.toNat(amount.e8s), 0, Time.now());
-        return #ok(trIndex);
+        let record = _genRecord(msg.caller, #mint, null, ?msg.caller, resAmount, 0, Time.now());
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecord(record);
+        };
+        return #ok(record.index);
+    };
+
+    public shared(msg) func mintForOwner(to: Principal, value: Nat): async MintResponse {
+        assert(msg.caller == owner_);
+        if (Option.isSome(balances.get(to))) {
+            balances.put(to, Option.unwrap(balances.get(to)) + value);
+            totalSupply_ += value;
+        } else {
+            if (value != 0) {
+                balances.put(to, value);
+                totalSupply_ += value;
+            };
+        };
+
+        let record = _genRecord(msg.caller, #mint, null, ?to, value, 0, Time.now());
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecord(record);
+        };
+        return #ok(record.index);
     };
 
     //burn amount WICP tokens from msg.caller
     public shared(msg) func burn(amount: Nat): async BurnResponse {
         let balance = _balanceOf(msg.caller);
+        if(amount < minBurnAmount) {return #err(#LessThanMinBurnAmount);};
         if(balance < amount + fee){ return #err(#InsufficientBalance);};
         balances.put(msg.caller, balance - amount);
         _addFee(msg.caller, fee);
         totalSupply_ := totalSupply_ - amount - fee;
 
-        var trIndex: TransactionIndex = _addRecord(msg.caller, #burn, ?msg.caller, null, amount, fee, Time.now());
-        ignore _addBurnRecord(msg.caller, #burn, ?msg.caller, null, amount, fee, Time.now());
-        return #ok(trIndex);
+        let record = _genRecord(msg.caller, #burn, ?msg.caller, null, amount, fee, Time.now());
+        if(storageCanister != null){
+            ignore Option.unwrap(storageCanister).addRecord(record);
+        };
+        
+        var accountId: AccountIdentifier = AID.fromPrincipal(msg.caller, null);
+        _addWithDrawRecord(msg.caller, accountId, #burn, amount, fee, Time.now());
+        return #ok(record.index);
     };
 
     public shared(msg) func wallet_receive() : async Nat {
@@ -319,8 +458,21 @@ shared(msg) actor class Token(_owner: Principal) {
         return accepted;
     };
 
+    public query func getMintInfo(blockNum: BlockHeight) : async ?MintInfo {
+        mintInfoMap.get(blockNum)
+    };
+
+    public shared query(msg) func getAllMintInfo() : async [(BlockHeight ,MintInfo)] {
+        assert(msg.caller == owner_);
+        Iter.toArray(mintInfoMap.entries())
+    };
+
     public query func balanceOf(who: Principal) : async Nat {
         return _balanceOf(who);
+    };
+
+    public query func getReceiveICPAcc() : async [AccountIdentifier] {
+        return receiveICPAccArray;
     };
 
     public query func allowance(owner: Principal, spender: Principal) : async Nat {
@@ -335,6 +487,14 @@ shared(msg) actor class Token(_owner: Principal) {
         return name_;
     };
 
+    public query func getStorageCanisterId() : async ?Principal {
+        var token:?Principal = null;
+        if(storageCanister != null){
+            token := ?Principal.fromActor(Option.unwrap(storageCanister));
+        };
+        return token;
+    };
+
     public query func decimals() : async Nat {
         return decimals_;
     };
@@ -347,44 +507,48 @@ shared(msg) actor class Token(_owner: Principal) {
         return owner_;
     };
 
+    public query func getFeeTo() : async Principal {
+        return feeTo;
+    };
+
+    public query func getFee() : async Nat {
+        return fee;
+    };
+
     public query func getUserNumber() : async Nat {
         return balances.size();
     };
 
-    /// Get History by index.
-    public query func getHistoryByIndex(index: Nat) : async OpRecord {
-        assert(index < ops.size());
-        return ops[index];
+    public query func getMinBurnAmount() : async Nat {
+        return minBurnAmount;
     };
 
-    public query func getBurnHistoryByIndex(index: Nat) : async ?OpRecord {
-        if(index < opsBurn.size()){
-            return ?opsBurn[index];
-        };
-        return null;
+    public shared query(msg) func getAllBalance() : async [(Principal, Nat)] {
+        assert(msg.caller == owner_);
+        Iter.toArray(balances.entries())
     };
 
-    /// Get history
-    public query func getHistory(start: Nat, num: Nat) : async [OpRecord] {
-        var ret: [OpRecord] = [];
-        var i = start;
-        while(i < start + num and i < ops.size()) {
-            ret := Array.append(ret, [ops[i]]);
-            i += 1;
-        };
-        return ret;
+    public shared query(msg) func getWithDrawRecordByIndex(index: Nat) : async ?WithDrawRecord {
+        assert(msg.caller == owner_ or msg.caller == dataUser);
+        opsWithDraw.get(index)
     };
 
-    /// Get history by account.
-    public query func getHistoryByAccount(a: Principal) : async [OpRecord] {
-        var res: [OpRecord] = [];
-        for (i in ops.vals()) {
-            if (i.caller == a or (Option.isSome(i.from) and Option.unwrap(i.from) == a) 
-                or (Option.isSome(i.to) and Option.unwrap(i.to) == a)) {
-                res := Array.append<OpRecord>(res, [i]);
+    public query func getWithDrawRecordSize(index: Nat) : async Nat {
+        opsWithDraw.size()
+    };
+
+    public query(msg) func getWithDrawRecord(start: Nat, num: Nat) : async [WithDrawRecord] {
+        assert(msg.caller == owner_ or msg.caller == dataUser);
+        var ret: [WithDrawRecord] = [];
+        label outer for(i in Iter.range(start, start + num - 1)){
+            switch(opsWithDraw.get(i)){
+                case (?w){
+                    ret := Array.append(ret, [w]);
+                };
+                case _ {break outer;};
             };
         };
-        return res;
+        return ret;
     };
     
     public query func getCycles() : async Nat {
@@ -394,25 +558,21 @@ shared(msg) actor class Token(_owner: Principal) {
     system func preupgrade() {
         balanceEntries := Iter.toArray(balances.entries());
         mintBlockHeightEntries := Iter.toArray(mintBlockHeightMap.entries());
-        var size : Nat = allowances.size();
-        var temp : [var (Principal, [(Principal, Nat)])] = Array.init<(Principal, [(Principal, Nat)])>(size, (owner_, []));
-        size := 0;
-        for ((k, v) in allowances.entries()) {
-            temp[size] := (k, Iter.toArray(v.entries()));
-            size += 1;
-        };
-        allowanceEntries := Array.freeze(temp);
+        mintInfoEntries := Iter.toArray(mintInfoMap.entries());
+        opsWithDrawEntries := Iter.toArray(opsWithDraw.entries());
     };
 
     system func postupgrade() {
         balances := HashMap.fromIter<Principal, Nat>(balanceEntries.vals(), 1, Principal.equal, Principal.hash);
         balanceEntries := [];
+
         mintBlockHeightMap := HashMap.fromIter<BlockHeight, Bool>(mintBlockHeightEntries.vals(), 1, Types.BlockHeight.equal, Types.BlockHeight.hash);
         mintBlockHeightEntries := [];
-        for ((k, v) in allowanceEntries.vals()) {
-            let allowed_temp = HashMap.fromIter<Principal, Nat>(v.vals(), 1, Principal.equal, Principal.hash);
-            allowances.put(k, allowed_temp);
-        };
-        allowanceEntries := [];
+
+        mintInfoMap := HashMap.fromIter<BlockHeight, MintInfo>(mintInfoEntries.vals(), 1, Types.BlockHeight.equal, Types.BlockHeight.hash);
+        mintInfoEntries := [];
+
+        opsWithDraw := HashMap.fromIter<RecordIndex, WithDrawRecord>(opsWithDrawEntries.vals(), 1, Types.RecordIndex.equal, Types.RecordIndex.hash);
+        opsWithDrawEntries := [];
     };
 };

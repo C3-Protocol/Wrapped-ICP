@@ -10,6 +10,10 @@
     "WICP_motoko": {
       "type": "motoko",
       "main": "src/WICP-motoko/token.mo"
+    },
+    "storage": {
+      "type": "motoko",
+      "main": "src/WICP-motoko/storage.mo"
     }
   },
   "defaults": {
@@ -20,6 +24,10 @@
   "networks": {
     "local": {
       "bind": "127.0.0.1:8000",
+      "type": "ephemeral"
+    },
+    "dev": {
+      "bind": "127.0.0.1:8001",
       "type": "ephemeral"
     }
   }
