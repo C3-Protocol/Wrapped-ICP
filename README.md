@@ -28,7 +28,7 @@ To build the code, proceed as follows after cloning the repository
 npm install
 dfx build --network ic
 dfx deploy --network ic
-dfx canister  call WICP_motoko addAccountToReceiveArray "\"8cd4e05794fdcdc37e5ece020d9d5daf01a3987a3869cbbe61a62f87f7773a1e\""
+dfx canister  call WICP_motoko addAccountToReceiveArray "\"Receiving Account\""
 dfx ledger --network ic transfer 8cd4e05794fdcdc37e5ece020d9d5daf01a3987a3869cbbe61a62f87f7773a1e --memo 1234 --amount 0.4999
 Transfer sent at BlockHeight: 337756
 

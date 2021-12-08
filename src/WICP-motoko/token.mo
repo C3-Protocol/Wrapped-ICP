@@ -414,25 +414,6 @@ shared(msg) actor class Token(_owner: Principal, _feeTo: Principal) {
         return #ok(record.index);
     };
 
-    public shared(msg) func mintForOwner(to: Principal, value: Nat): async MintResponse {
-        assert(msg.caller == owner_);
-        if (Option.isSome(balances.get(to))) {
-            balances.put(to, Option.unwrap(balances.get(to)) + value);
-            totalSupply_ += value;
-        } else {
-            if (value != 0) {
-                balances.put(to, value);
-                totalSupply_ += value;
-            };
-        };
-
-        let record = _genRecord(msg.caller, #mint, null, ?to, value, 0, Time.now());
-        if(storageCanister != null){
-            ignore Option.unwrap(storageCanister).addRecord(record);
-        };
-        return #ok(record.index);
-    };
-
     //burn amount WICP tokens from msg.caller
     public shared(msg) func burn(amount: Nat): async BurnResponse {
         let balance = _balanceOf(msg.caller);
